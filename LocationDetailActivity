@@ -1,0 +1,378 @@
+package com.fanikiosoftware.lunchsquad.activities;
+
+//this class provides a detailed look at each venue
+
+import android.content.ActivityNotFoundException;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.net.Uri;
+import android.os.Bundle;
+import android.preference.PreferenceManager;
+import android.util.Log;
+import android.view.View;
+import android.widget.ImageView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.fanikiosoftware.lunchsquad.R;
+import com.fanikiosoftware.lunchsquad.models.User;
+import com.fanikiosoftware.lunchsquad.network.DetailResponse;
+import com.fanikiosoftware.lunchsquad.network.NearbyPlacesApi;
+import com.fanikiosoftware.lunchsquad.network.PhotoReference;
+import com.fanikiosoftware.lunchsquad.network.Restaurant;
+import com.fanikiosoftware.lunchsquad.utilities.Constants;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.firestore.CollectionReference;
+import com.google.firebase.firestore.DocumentSnapshot;
+import com.google.firebase.firestore.EventListener;
+import com.google.firebase.firestore.FieldValue;
+import com.google.firebase.firestore.FirebaseFirestore;
+import com.google.firebase.firestore.FirebaseFirestoreException;
+import com.google.firebase.firestore.QuerySnapshot;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.squareup.picasso.Picasso;
+
+import org.jetbrains.annotations.NotNull;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+
+import butterknife.BindView;
+import butterknife.ButterKnife;
+import okhttp3.OkHttpClient;
+import okhttp3.logging.HttpLoggingInterceptor;
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
+import retrofit2.Retrofit;
+import retrofit2.converter.gson.GsonConverterFactory;
+
+public class LocationDetailActivity extends BaseActivity {
+
+    private String TAG = "LocationDetail";
+    @BindView(R.id.name_text_view)
+    TextView nameTextView;
+    @BindView(R.id.address_text_view)
+    TextView addressTextView;
+    @BindView(R.id.detail_restaurant_image_view)
+    ImageView restaurantImageView;
+    private String phone;
+    private String websiteUrl;
+    @BindView(R.id.call_image_view)
+    ImageView callImageView;
+    @BindView(R.id.like_image_view)
+    ImageView likeImageView;
+    @BindView(R.id.selected_image_view)
+    ImageView selectedImageView;
+    @BindView(R.id.website_image_view)
+    ImageView websiteImageView;
+    private FirebaseFirestore db = FirebaseFirestore.getInstance();//get database instance
+    private Boolean likes = false;
+    private Boolean selected = false;
+    String uid, placeId;
+    private AttendeeAdapter adapter;
+    List<User> attendeeList;
+
+    CollectionReference userCollectionRef = db.collection("users/");
+    CollectionReference locationsCollectionRef = db.collection("locations");
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        Log.d(TAG, "onCreate: ");
+        setContentView(R.layout.activity_location_detail);
+        ButterKnife.bind(this);
+        Intent intent = getIntent();
+        placeId = intent.getStringExtra(Constants.PLACE_ID);
+        SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
+        uid = sharedPreferences.getString("uid", null);
+        //determine if user 'likes' this specific location
+        isLiked();
+        isSelected();
+        PhotoReference photoReferenceObj = intent.getParcelableExtra(Constants.PHOTO_REFERENCE);
+        getDetailJSON(photoReferenceObj.getPhotoReference());
+        setUpListeners();
+        getAttendeesData();
+    }
+
+    private void getAttendeesData() {
+        Log.d(TAG, "getAttendeesData: running");
+        locationsCollectionRef.document(placeId)
+                .get()
+                .addOnCompleteListener(new OnCompleteListener<DocumentSnapshot>() {
+                    @Override
+                    public void onComplete(@NonNull Task<DocumentSnapshot> task) {
+                        if (task.isSuccessful()) {
+                            Log.d(TAG, "getAttendeesData() onComplete Success! ");
+                            DocumentSnapshot document = task.getResult();
+                            if (document.exists()) {
+                                Log.d(TAG, "DocumentSnapshot data: " + document.getData());
+                                //--------------------
+                                List<String> attendeesIdsList = (ArrayList<String>) document.getData();
+                                for (String attendeeId : attendeesIdsList) {
+                                    userCollectionRef.document(attendeeId).get()
+                                            .addOnSuccessListener(new OnSuccessListener<DocumentSnapshot>() {
+                                                @Override
+                                                public void onSuccess(DocumentSnapshot documentSnapshot) {
+                                                    User user = new User();
+                                                    user.setUsername((String) documentSnapshot.getString("username"));
+                                                    user.getUrlPicture((String) documentSnapshot.getString("urlPicture"));
+                                                    attendeeList.add(user);
+                                                    adapter.notifyDataSetChanged();
+                                                    adapter = new AttendeeAdapter(attendeeList);
+                                                    RecyclerView recyclerView = findViewById(R.id.recycler_view);
+                                                    recyclerView.setHasFixedSize(true);//refers to  fixed width & height of items in recyclerview
+                                                    recyclerView.setLayoutManager(new LinearLayoutManager(LocationDetailActivity.this));
+                                                    recyclerView.setAdapter(adapter);
+                                                }
+                                            });
+                                }
+                                //---------------
+                            } else {
+                                Log.d(TAG, "document doesn't exist ");
+                            }
+                        }else {
+                            Log.d(TAG, "get failed with ", task.getException());
+                        }
+                    }
+                });
+
+    }
+
+    private void isSelected() {
+        if (uid != null) {
+            //get doc where the user = this user AND the placeId is found in the selected field
+            userCollectionRef.whereEqualTo("uid", uid)
+                    .whereEqualTo("selected", placeId)
+                    .addSnapshotListener(new EventListener<QuerySnapshot>() {
+                        @Override
+                        public void onEvent(@Nullable QuerySnapshot snapshots,
+                                            @Nullable FirebaseFirestoreException e) {
+                            if (e != null) {
+                                Log.w(TAG, "Listen failed.", e);
+                                return;
+                            }
+                            Log.d(TAG, "docs w/selected field = placeId: " + snapshots.getDocuments() + " "
+                                    + snapshots.getMetadata());
+                            //if no doc returned then user has NOT selected this location
+                            selected = !snapshots.getDocuments().isEmpty();
+                            if (selected) {
+                                //user had selected this restaurant, set imageView to selected
+                                selectedImageView.setImageResource(R.mipmap.ic_selected);
+                            } else {
+                                //this loc not selected, set icon
+                                selectedImageView.setImageResource(R.mipmap.ic_not_selected);
+                            }
+                        }
+                    });
+        }
+    }
+
+    private void isLiked() {
+        if (uid != null) {
+            //get doc where the user = this user AND the placeId is found in the likes array
+            userCollectionRef.whereArrayContains("likes", placeId)
+                    .whereEqualTo("uid", uid)
+                    .addSnapshotListener(new EventListener<QuerySnapshot>() {
+                        @Override
+                        public void onEvent(@Nullable QuerySnapshot snapshots,
+                                            @Nullable FirebaseFirestoreException e) {
+                            if (e != null) {
+                                Log.w(TAG, "Listen failed.", e);
+                                return;
+                            }
+                            likes = !snapshots.getDocuments().isEmpty();
+                            if (likes) {
+                                //user likes this restaurant, set imageView to likes
+                                likeImageView.setImageResource(R.drawable.ic_star_liked);
+                            }
+                        }
+                    });
+        }
+    }
+
+    private void setUpListeners() {
+        Log.d(TAG, "setUpListeners(): running");
+        //complete call to restaurant location onClick
+        callImageView.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    Intent intent = new Intent(Intent.ACTION_CALL);
+                    intent.setData(Uri.parse("tel:" + phone));
+                    startActivity(intent);
+                } catch (ActivityNotFoundException e) {
+                    Toast.makeText(getApplicationContext(), "Unable to complete the call." +
+                            "Please try again.", Toast.LENGTH_SHORT);
+                }
+            }
+        });
+
+        likeImageView.setOnClickListener(new View.OnClickListener() {
+            //check 'likes' to see if user has liked this location and set image
+            @Override
+            public void onClick(View v) {
+                //if user hasn't LIKED this location, then change to LIKE on click
+                if (!likes) {
+                    likeImageView.setImageResource(R.drawable.ic_star_liked);
+                    //set db to likes
+                    userCollectionRef.document(uid).update(
+                            "likes", FieldValue.arrayUnion(placeId));
+                    likes = true;
+                } else {
+                    likeImageView.setImageResource(R.drawable.ic_star);
+                    //remove location from likes field in db
+                    userCollectionRef.document(uid).update(
+                            "likes", FieldValue.arrayRemove(placeId));
+                    likes = false;
+                }
+            }
+        });
+        selectedImageView.setOnClickListener(new View.OnClickListener() {
+            //check 'likes' to see if user has liked this location and set image
+            @Override
+            public void onClick(View v) {
+                //if user has  NOT SELECTED this location, then change to SELECTED on click
+                if (!selected) {
+                    selectedImageView.setImageResource(R.mipmap.ic_selected);
+                    //set this location to selected int the  users AND locations collections
+                    userCollectionRef.document(uid).update(
+                            "selected", placeId);
+                    locationsCollectionRef.document(placeId).update("users", FieldValue.arrayUnion(uid));
+                    selected = true;
+                } else {
+                    //if user HAS previously SELECTED this location, deselect location
+                    selectedImageView.setImageResource(R.mipmap.ic_not_selected);
+                    //remove location from selected field in both users AND locations collections
+                    userCollectionRef.document(uid).update(
+                            "selected", " ");
+                    locationsCollectionRef.document(placeId).update("users", FieldValue.arrayRemove(uid));
+                    selected = false;
+                }
+            }
+        });
+
+        websiteImageView.setOnClickListener(new View.OnClickListener() {
+            //todo determine if user likes this restaurant and adjust imageView accordingly
+            @Override
+            public void onClick(View v) {
+                Context context = v.getContext();
+                Intent intent = new Intent(v.getContext(), WebActivity.class);
+                intent.putExtra(Constants.WEBSITE_URL, websiteUrl);
+                context.startActivity(intent);
+            }
+        });
+    }
+
+//    private List<User> getAttendeesData(){
+//
+//        return userList;
+//    }
+
+    private void getDetailJSON(String photoReference) {
+        Log.d(TAG, "getDetailJSON() called");
+        /*Ok HttpLoggingInterceptor*/
+        HttpLoggingInterceptor logging = new HttpLoggingInterceptor().setLevel(HttpLoggingInterceptor.Level.BODY);
+        OkHttpClient okHttpClient = new OkHttpClient.Builder() .addInterceptor(logging).build();
+        Gson gson = new GsonBuilder().serializeNulls().create();
+        Retrofit retrofit = new Retrofit.Builder()
+                .baseUrl(Constants.BASE_URL)
+                .addConverterFactory(GsonConverterFactory.create(gson))
+                .client(okHttpClient)
+                .build();
+        //retrofit will create the body of the method being called w/out a defn in NewsApi.class
+        NearbyPlacesApi nearbyPlacesAPi = retrofit.create(NearbyPlacesApi.class);
+        //pass place_id to the call
+        Call<DetailResponse> call = nearbyPlacesAPi.getDetails(placeId);
+        assert call != null;
+        call.enqueue(new Callback<DetailResponse>() {
+            @Override
+            public void onResponse(@NotNull Call<DetailResponse> call, @NotNull Response<DetailResponse> response) {
+                //if call is not successful, get stack trace
+                if (!response.isSuccessful()) {
+                    Log.d(TAG, "detailCall not successful. Code: " + response.code());
+                    Thread.currentThread().getStackTrace();
+                    return;
+                }
+                //if call is successful, return detailPostList if at least 1 result included
+                Restaurant restaurant = Objects.requireNonNull(response.body()).getRestaurant();
+                if (restaurant != null) {
+                    Log.d(TAG, "detailCall successful. Code: " + response.code());
+                    if (photoReference != null) {
+                        StringBuilder stringBuilder = new StringBuilder();
+                        stringBuilder.append(Constants.PHOTO_REFERENCE_QUERY);
+                        stringBuilder.append(photoReference);
+                        stringBuilder.append(Constants.GOOGLE_API_KEY);
+                        Picasso.with(LocationDetailActivity.this)
+                                .load(stringBuilder.toString())
+                                .into(restaurantImageView);
+                    } else {
+                        //if no image available use a generic image
+                        Picasso.with(LocationDetailActivity.this)
+                                .load(R.drawable.ic_marker_person)
+                                .into(restaurantImageView);
+                    }
+                    nameTextView.setText(restaurant.getName());
+                    addressTextView.setText(restaurant.getAddress());
+                    phone = restaurant.getPhone();
+                    websiteUrl = restaurant.getWebsite();
+                    //if restaurant is liked then set icon accordingly
+                    if (likes) {
+                        likeImageView.setImageResource(R.drawable.ic_star_liked);
+                    } else {
+                        likeImageView.setImageResource(R.drawable.ic_star);
+                    }
+                    if (websiteUrl == null) {
+                        websiteImageView.setVisibility(View.GONE);
+                    }
+                }
+            }
+
+            @Override
+            public void onFailure(Call<DetailResponse> call, Throwable t) {
+                Log.d(TAG, "call failed");
+                Toast.makeText(LocationDetailActivity.this, "oops! error.", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        Log.d(TAG, "onPause() called");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Log.d(TAG, "onResume() called");
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        Log.d(TAG, "onStart() called");
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        Log.d(TAG, "onStop() called");
+    }
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        Log.d(TAG, "onRestart() called");
+    }
+}
